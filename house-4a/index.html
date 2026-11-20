@@ -801,7 +801,7 @@ async function loadModels() {
   await Promise.all(specs.map(async ([key, spec]) => {
     const [id, nodes] = spec.split(":");
     try {
-      const gl = await loader.loadAsync(`models/${id}/${id}_1k.gltf`);
+      const gl = await loader.loadAsync(`models/${id}.json`);
       let obj = gl.scene;
       if (nodes) {                                   // keep only the named variant(s), centred on the origin
         const keep = nodes.split(","), grp = new THREE.Group();

@@ -232,6 +232,8 @@ const M = {
   floorF: new THREE.MeshStandardMaterial({ map: texF, color: P.floorTint, roughness: 0.92 }),
   glass: new THREE.MeshStandardMaterial({ color: 0x8fb8cc, roughness: 0.08, metalness: 0.2, transparent: true, opacity: 0.38, depthWrite: false }),
   steel: new THREE.MeshStandardMaterial({ color: 0x8d969c, roughness: 0.35, metalness: 0.75 }),
+  winFrame: new THREE.MeshStandardMaterial({ color: 0x24272b, roughness: 0.5, metalness: 0.2 }),
+  winSlat: new THREE.MeshStandardMaterial({ color: 0x8a5634, roughness: 0.6 }),
   stair: new THREE.MeshStandardMaterial({ color: 0xbfb6a8, roughness: 0.6 }),
   ground: new THREE.MeshStandardMaterial({ color: 0x9aa58a, roughness: 1 }),
   road: new THREE.MeshStandardMaterial({ color: 0x6d7072, roughness: 0.95 }),
@@ -346,7 +348,7 @@ function build() {
   data.floors.forEach((fl, i) => {
     const base = i * FH, top = base + FH;
     const grp = i === 0 ? groups.g0 : groups.g1;
-    const wall = [], glass = [], steel = [], liftDoor = [];
+    const wall = [], glass = [], steel = [], liftDoor = [], winFrame = [], winSlat = [];
     const lowZone = STAIR ? { x0: STAIR.x0 - 0.1, x1: STAIR.x1, z0: STAIR.zb - 0.7, z1: STAIR.z1 + 0.05 } : null;
     const lowTop = 12 * R - 0.55;
     fl.solid.forEach(r => {
@@ -365,6 +367,26 @@ function build() {
     fl.window.forEach(r => {
       wall.push([...r, base, base + P.sill], [...r, base + P.head, top]);
       glass.push([...r, base + P.sill, base + P.head]);
+    });
+    // window units: dark frame, centre post, leaves of horizontal wooden louvers in front of the glass
+    railGroups(fl.window).forEach(g => {
+      const b = { x0: g.box.x0 + 0.4, x1: g.box.x1 - 0.4, z0: g.box.z0 + 0.4, z1: g.box.z1 - 0.4 };
+      const horiz = b.x1 - b.x0 >= b.z1 - b.z0, L = horiz ? b.x1 - b.x0 : b.z1 - b.z0;
+      if (L < 1) return;
+      const c = horiz ? (b.z0 + b.z1) / 2 : (b.x0 + b.x1) / 2, a0 = horiz ? b.x0 : b.z0;
+      const y0 = base + P.sill, y1 = base + P.head;
+      const seg = (s0, s1, d, ya, yb, list) =>                // piece spanning [s0,s1] along the wall, depth d
+        list.push(horiz ? [s0, c - d / 2, s1 - s0, d, ya, yb] : [c - d / 2, s0, d, s1 - s0, ya, yb]);
+      const F = 0.22, D = 0.4;
+      seg(a0, a0 + F, D, y0, y1, winFrame); seg(a0 + L - F, a0 + L, D, y0, y1, winFrame);
+      seg(a0, a0 + L, D, y1 - F, y1, winFrame); seg(a0, a0 + L, D, y0, y0 + F, winFrame);
+      const n = L > 6.5 ? 3 : L > 2.6 ? 2 : 1, lw = (L - 2 * F) / n;
+      for (let k = 0; k < n; k++) {
+        const s0 = a0 + F + k * lw, s1 = s0 + lw;
+        if (k > 0) seg(s0 - 0.08, s0 + 0.08, D * 0.9, y0, y1, winFrame);
+        seg(s0 + 0.04, s0 + 0.14, 0.26, y0 + F, y1 - F, winFrame); seg(s1 - 0.14, s1 - 0.04, 0.26, y0 + F, y1 - F, winFrame);
+        for (let y = y0 + F + 0.12; y < y1 - F - 0.1; y += 0.18) seg(s0 + 0.14, s1 - 0.14, 0.24, y, y + 0.13, winSlat);
+      }
     });
     fl.door.forEach(r => wall.push([...r, base + P.doorH, top]));
     railGroups(fl.rail).forEach(g => {
@@ -391,6 +413,8 @@ function build() {
     if (glass.length) { const gm = instanced(glass, M.glass, false); gm.renderOrder = 2; grp.add(gm); }
     if (steel.length) grp.add(instanced(steel, M.steel));
     if (liftDoor.length) { const ld = instanced(liftDoor, M.steel); liftDoors.push(ld); grp.add(ld); }
+    if (winFrame.length) grp.add(instanced(winFrame, M.winFrame));
+    if (winSlat.length) grp.add(instanced(winSlat, M.winSlat));
 
     // room lights at the centre of each room
     fl.rooms.forEach(([x, z, area]) => {

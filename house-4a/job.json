@@ -26,7 +26,8 @@
    "Furniture is placed where the plan draws it, as simple blocks.",
    "Concept model for discussion, not a construction drawing."
   ],
-  "artifact_url": "https://claude.ai/artifact/LsFRLJBf2fcSLfLz385iLK"
+  "artifact_url": "https://claude.ai/artifact/LsFRLJBf2fcSLfLz385iLK",
+  "site_url": "https://aravinthanphoenix-hue.github.io/house-models/house-4a/"
  },
  "source": {
   "pdf": "source_plan.pdf",

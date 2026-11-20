@@ -399,7 +399,6 @@ function build() {
     });
     fl.window.forEach(r => {
       wall.push([...r, base, base + P.sill], [...r, base + P.head, top]);
-      glass.push([...r, base + P.sill, base + P.head]);
     });
     // window units: dark frame, centre post, leaves of horizontal wooden louvers in front of the glass
     railGroups(fl.window).forEach(g => {
@@ -413,7 +412,9 @@ function build() {
       const F = 0.22, D = 0.4;
       seg(a0, a0 + F, D, y0, y1, winFrame); seg(a0 + L - F, a0 + L, D, y0, y1, winFrame);
       seg(a0, a0 + L, D, y1 - F, y1, winFrame); seg(a0, a0 + L, D, y0, y0 + F, winFrame);
-      const n = L > 6.5 ? 3 : L > 2.6 ? 2 : 1, lw = (L - 2 * F) / n;
+      const gc = c + 0.17;                                  // thin glass pane just behind the louvers
+      glass.push(horiz ? [a0 + F, gc - 0.02, L - 2 * F, 0.04, y0 + F, y1 - F] : [gc - 0.02, a0 + F, 0.04, L - 2 * F, y0 + F, y1 - F]);
+      const n =L > 6.5 ? 3 : L > 2.6 ? 2 : 1, lw = (L - 2 * F) / n;
       for (let k = 0; k < n; k++) {
         const s0 = a0 + F + k * lw, s1 = s0 + lw;
         if (k > 0) seg(s0 - 0.08, s0 + 0.08, D * 0.9, y0, y1, winFrame);
@@ -508,10 +509,13 @@ function build() {
   st.push([STAIR.x0, STAIR.z0, STAIR.xm - STAIR.x0, STAIR.za - STAIR.z0, 0, 6 * R]);          // landing 1
   for (let k = 0; k < 5; k++)                     // flight 2: down the left side
     st.push([STAIR.x0, STAIR.za + k * run2, STAIR.xm - STAIR.x0, run2, 0, (7 + k) * R]);
-  st.push([STAIR.x0, STAIR.zb, STAIR.xm - STAIR.x0, STAIR.z1 - STAIR.zb, 12 * R - 0.5, 12 * R]); // landing 2
+  // landing 2 and flight 3 sit above the ground-floor ceiling line (over the toilets), so they belong to the
+  // first-floor group: "Ground only" views then cut through the house like a plan and the rooms below show
+  const stHigh = [[STAIR.x0, STAIR.zb, STAIR.xm - STAIR.x0, STAIR.z1 - STAIR.zb, 12 * R - 0.5, 12 * R]]; // landing 2
   for (let k = 0; k < 5; k++)                     // flight 3: back towards the hall, arrives at first floor
-    st.push([STAIR.xm + k * run3, STAIR.zb, run3, STAIR.z1 - STAIR.zb, (13 + k) * R - 0.7, (13 + k) * R]);
+    stHigh.push([STAIR.xm + k * run3, STAIR.zb, run3, STAIR.z1 - STAIR.zb, (13 + k) * R - 0.7, (13 + k) * R]);
   groups.g0.add(instanced(st, M.stair));
+  groups.g1.add(instanced(stHigh, M.stair));
   }
 
   addFurniture(groups.g0, 0, FURN.ground);
@@ -982,7 +986,7 @@ function keyParam(s, t) {
 const capEl = document.getElementById("caption"), capMain = document.getElementById("cap-main"),
       capSub = document.getElementById("cap-sub"), fadeEl = document.getElementById("fade");
 let lastShot = null;
-function renderAt(T) {
+function renderAt(T, noDraw = false) {
   T = Math.min(Math.max(T, 0), TOUR_LEN - 1e-4);
   const s = SHOTS.find(s => T < s.t0 + s.d) || SHOTS[SHOTS.length - 1];
   const t = T - s.t0;
@@ -1009,7 +1013,11 @@ function renderAt(T) {
     const a = Math.min(1, (t - c[0]) / 0.5, (c[1] - t) / 0.5);
     capEl.style.opacity = a;
   } else capEl.style.opacity = 0;
-  draw();
+  if (!noDraw) draw();
+  const q = s.qc.getPoint(u);
+  return { p: camera.position.toArray(), t: q.toArray(), fov: camera.fov, level: s.level, hour: h, lights: s.lights,
+           lift: s.lift || null, carY: liftCar.position.y, fade: +fadeEl.style.opacity,
+           cap: c ? [c[2], c[3], +capEl.style.opacity] : null };
 }
 window.renderAt = renderAt;
 // still frame from any camera, for checking the model (used by tools, not the UI)
@@ -1020,6 +1028,52 @@ window.previewView = (pos, tgt, hour = 10.5, lights = false, lvl = "all") => {
   camera.position.set(...pos); camera.lookAt(...tgt); draw();
 };
 window.TOUR_LEN = TOUR_LEN;
+
+// ---------- export for Blender: the whole house as one GLB, plus the tour's per-frame camera/state ----------
+// Mesh names carry tags the Blender script uses: L0_/L1_/L2_ = ground / first floor / roof group,
+// LIFTCAR / LIFTDOOR for the animated lift, SITE_ for ground, road and footpath.
+window.exportScene = async () => {
+  const { GLTFExporter } = await import("three/addons/exporters/GLTFExporter.js");
+  const { mergeGeometries } = await import("three/addons/utils/BufferGeometryUtils.js");
+  setPlanMode(false); setLevel("all"); liftCar.visible = true; liftDoors.forEach(m => m.visible = true);
+  Object.entries(M).forEach(([k, m]) => { m.name = k; });
+  Object.entries(FACADE_MAT).forEach(([k, m]) => { if (m && m.isMaterial) m.name = "f_" + k; });
+  Object.entries(FIN_CACHE).forEach(([k, m]) => { m.name = "fin_" + k; });
+  scene.updateMatrixWorld(true);
+  const root = new THREE.Group(), tmp = new THREE.Matrix4();
+  const take = (src, tag) => src.traverse(o => {
+    let v = true; for (let a = o; a; a = a.parent) if (!a.visible && a !== liftCar && !liftDoors.includes(a)) v = false;
+    if (!v) return;
+    const name = (liftDoors.includes(o) ? "LIFTDOOR" : tag) + "_" + root.children.length;
+    if (o.isInstancedMesh) {
+      if (!o.count) return;
+      const parts = [];
+      for (let i = 0; i < o.count; i++) {
+        o.getMatrixAt(i, tmp);
+        parts.push(o.geometry.clone().applyMatrix4(tmp.premultiply(o.matrixWorld)));
+      }
+      const m = new THREE.Mesh(mergeGeometries(parts), o.material); m.name = name; root.add(m);
+    } else if (o.isMesh && !(o.material && o.material.isMeshBasicMaterial)) {
+      const m = new THREE.Mesh(o.geometry, o.material); m.name = name;
+      o.matrixWorld.decompose(m.position, m.quaternion, m.scale); root.add(m);
+    } else if (o.isPointLight && o.userData.power) {
+      const L = new THREE.PointLight(o.color, o.userData.power, o.distance, o.decay); L.name = "ROOMLIGHT_" + tag + "_" + root.children.length;
+      o.getWorldPosition(L.position); root.add(L);
+    }
+  });
+  take(groups.g0, "L0"); take(groups.g1, "L1"); take(groups.g2, "L2"); take(liftCar, "LIFTCAR");
+  [earth, road, footpath].forEach(o => take(o, "SITE"));
+  const glb = await new GLTFExporter().parseAsync(root, { binary: true });
+  let s = ""; const b = new Uint8Array(glb);
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+  setPlanMode(document.getElementById("plan").checked); liftCar.visible = false;
+  return btoa(s);
+};
+window.exportTourFrames = (fps = 30) => {
+  const out = [];
+  for (let i = 0, n = Math.floor(TOUR_LEN * fps); i < n; i++) out.push(renderAt(i / fps, true));
+  return { fps, frames: out, facing: +document.getElementById("facing").value };
+};
 
 let touring = null;
 function startTour() {

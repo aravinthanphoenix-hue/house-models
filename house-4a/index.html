@@ -155,6 +155,7 @@ import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
 import { GTAOPass } from "three/addons/postprocessing/GTAOPass.js";
 import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 
 const [data, job] = await Promise.all([fetch("house.json").then(r => r.json()), fetch("job.json").then(r => r.json())]);
 { // panel text from the job file
@@ -743,6 +744,7 @@ function addSite(site) {
     }
   });
   (site.shrubs || []).forEach(([x, z], i) => {
+    if (placeModel(g, "shrub", x, 0, z, rnd() * 6.28, null, 3.2)) return;
     const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.9 + rnd() * 0.4, 1), leaf2);
     b.position.set(x, 0.8, z); b.scale.y = 0.85; b.castShadow = true; g.add(b);
     for (let k = 0; k < 5; k++) {
@@ -788,66 +790,201 @@ const OPP = { n: "s", s: "n", e: "w", w: "e" };
 const ENDS = s => (s === "n" || s === "s") ? ["w", "e"] : ["n", "s"];
 const along = (r, s) => (s === "n" || s === "s") ? r.z1 - r.z0 : r.x1 - r.x0;
 
+// model library (Poly Haven glTF, real-world metres): job.models maps a key to "id" or "id:node,node"
+const MODELS = {};
+const YAW = { n: 0, s: Math.PI, e: -Math.PI / 2, w: Math.PI / 2 };   // native back (-z) turned towards a side
+async function loadModels() {
+  const specs = Object.entries(job.models || {});
+  if (!specs.length) return;
+  const { GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js");
+  const loader = new GLTFLoader();
+  await Promise.all(specs.map(async ([key, spec]) => {
+    const [id, nodes] = spec.split(":");
+    try {
+      const gl = await loader.loadAsync(`models/${id}/${id}_1k.gltf`);
+      let obj = gl.scene;
+      if (nodes) {                                   // keep only the named variant(s), centred on the origin
+        const keep = nodes.split(","), grp = new THREE.Group();
+        const picked = []; gl.scene.traverse(o => { if (keep.includes(o.name)) picked.push(o); });
+        const off = picked[0] ? picked[0].position.clone() : new THREE.Vector3();
+        picked.forEach(o => { const c = o.clone(true); c.position.sub(off).setY(o.position.y); grp.add(c); });
+        obj = grp;
+      }
+      obj.traverse(o => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
+      MODELS[key] = obj;
+    } catch (e) { console.warn("model not loaded:", key, e.message); }
+  }));
+}
+function placeModel(g, key, cx, y, cz, side = "n", fit = null, size = 1) {
+  const src = MODELS[key]; if (!src) return false;
+  const m = src.clone(true);
+  m.scale.setScalar(3.2808 * size); m.rotation.y = YAW[side] ?? side; m.updateMatrixWorld(true);
+  if (fit) {
+    const b = new THREE.Box3().setFromObject(m);
+    const k = Math.min(fit[0] / (b.max.x - b.min.x), fit[1] / (b.max.z - b.min.z));
+    if (k < 1) { m.scale.multiplyScalar(k); m.updateMatrixWorld(true); }
+  }
+  const b = new THREE.Box3().setFromObject(m);
+  m.position.set(cx - (b.min.x + b.max.x) / 2, y - b.min.y, cz - (b.min.z + b.max.z) / 2);
+  g.add(m); return true;
+}
+
 function addFurniture(g, y, list) {
   const B = (r, y0, y1, c, o) => {
-    const m = new THREE.Mesh(UNIT, mat(c, o));
+    const m = new THREE.Mesh(UNIT, typeof c === "string" ? mat(c, o) : c);
     m.position.set((r.x0 + r.x1) / 2, y + (y0 + y1) / 2, (r.z0 + r.z1) / 2);
     m.scale.set(r.x1 - r.x0, y1 - y0, r.z1 - r.z0);
     m.castShadow = m.receiveShadow = true; g.add(m); return m;
   };
+  const RB = (r, y0, y1, c, rad = 0.15, o) => {          // rounded box
+    const w = r.x1 - r.x0, h = y1 - y0, d = r.z1 - r.z0, rr = Math.min(rad, w / 2.01, h / 2.01, d / 2.01);
+    const m = new THREE.Mesh(new RoundedBoxGeometry(w, h, d, 3, rr), typeof c === "string" ? mat(c, o) : c);
+    m.position.set((r.x0 + r.x1) / 2, y + (y0 + y1) / 2, (r.z0 + r.z1) / 2);
+    m.castShadow = m.receiveShadow = true; g.add(m); return m;
+  };
+  const cyl = (x, z, r0, r1, y0, y1, c, o, sx = 1, sz = 1) => {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(r1, r0, y1 - y0, 28), typeof c === "string" ? mat(c, o) : c);
+    m.position.set(x, y + (y0 + y1) / 2, z); m.scale.set(sx, 1, sz); m.castShadow = m.receiveShadow = true; g.add(m); return m;
+  };
+  const split = (r, side, n) => {                         // n equal pieces along the length (perpendicular to `side`)
+    const [e0] = ENDS(side), L = along(r, e0), out = [];
+    for (let i = 0; i < n; i++) out.push(trim(trim(r, e0, L * i / n), OPP[e0], L * (n - 1 - i) / n));
+    return out;
+  };
+  const CH = { m: 0.9, r: 0.18 }, CHROME = "#cfd4d8", PORC = WHITE;
+  let plantNo = 0;
   for (const [type, a, p1, p2] of list) {
     const r = a.length === 4 ? { x0: a[0], z0: a[1], x1: a[2], z1: a[3] } : null;
+    const cx = r ? (r.x0 + r.x1) / 2 : a[0], cz = r ? (r.z0 + r.z1) / 2 : a[1];
     switch (type) {
       case "rug": B(r, 0.01, 0.05, p1, { r: 1 }); break;
-      case "sofa": {
-        B(r, 0, 1.4, p2); B(strip(r, p1, 0.75), 0, 2.8, p2);
-        ENDS(p1).forEach(e => B(strip(r, e, 0.5), 0, 2.1, p2));
-        break;
-      }
-      case "table": B(r, p1 - 0.15, p1, WOOD, { r: 0.5 }); B(inset(r, Math.min(r.x1 - r.x0, r.z1 - r.z0) * 0.3), 0, p1 - 0.15, WOOD_D); break;
-      case "chair": B(r, 1.35, 1.55, WOOD); B(inset(r, 0.3), 0, 1.35, WOOD_D); B(strip(r, p1, 0.18), 1.55, 3.1, WOOD); break;
-      case "tv": {
-        B(r, 0, 1.6, WOOD_D, { r: 0.5 });
-        const sc = strip(r, p1, 0.12), e = ENDS(p1), w = along(r, e[0]) * 0.17;
-        B(trim(trim(sc, e[0], w), e[1], w), 3.0, 5.6, "#111418", { r: 0.25, m: 0.4 });
-        break;
-      }
-      case "cabinet": B(r, 0, p1, WOOD); break;
-      case "side": B(r, 0, 1.9, WOOD); B(inset(r, 0.45), 1.9, 3.0, "#f1e2c4", { r: 0.6 }); break;
-      case "counter": B(r, 0, 2.75, "#d9d2c5"); B(r, 2.75, 2.9, "#34363a", { r: 0.3 }); break;
-      case "sink": B(r, 2.9, 2.95, "#a9b1b6", { m: 0.8, r: 0.25 }); break;
-      case "stove": B(r, 2.9, 3.0, "#1b1b1d", { r: 0.4 }); break;
-      case "fridge": B(r, 0, 6, "#dfe3e6", { m: 0.35, r: 0.3 }); break;
-      case "wardrobe": B(r, 0, 7, WOOD); break;
-      case "wc": B(inset(r, 0.1), 0, 1.3, WHITE, { r: 0.2 }); if (p1) B(strip(r, p1, 0.55), 0, 2.6, WHITE, { r: 0.2 }); break;
-      case "basin": B(r, 2.5, 2.85, WHITE, { r: 0.2 }); B(inset(r, 0.35), 0, 2.5, WHITE, { r: 0.2 }); break;
-      case "tub": B(r, 0, 1.8, WHITE, { r: 0.2 }); B(inset(r, 0.3), 1.6, 1.81, "#9ec7d8", { r: 0.1 }); break;
-      case "bed": {
-        const len = along(r, p1);
-        B(r, 0, 1.2, WOOD); B(inset(r, 0.15), 1.2, 1.95, WHITE);
-        B(strip(r, p1, 0.35), 0, 3.6, WOOD_D);
-        const pr = strip(trim(r, p1, 0.5), p1, 1.4), e = ENDS(p1), half = along(pr, e[0]) / 2;
-        B(inset(trim(pr, e[1], half), 0.25), 1.95, 2.4, "#ffffff");
-        B(inset(trim(pr, e[0], half), 0.25), 1.95, 2.4, "#ffffff");
-        B(trim({ x0: r.x0 - 0.05, z0: r.z0 - 0.05, x1: r.x1 + 0.05, z1: r.z1 + 0.05 }, p1, len * 0.42), 1.95, 2.08, p2);
-        break;
-      }
-      case "car": {
-        const len = along(r, p1), back = OPP[p1], e = ENDS(p1);
-        B(inset(r, 0.1), 0.65, 2.3, p2, { m: 0.55, r: 0.3 });
-        const cab = trim(trim(inset(r, 0.5), p1, len * 0.3), back, len * 0.17);
-        B(cab, 2.3, 3.9, "#1f262c", { m: 0.4, r: 0.12 });
-        B(inset(cab, 0.15), 3.9, 4.05, p2, { m: 0.55, r: 0.3 });
-        const wg = new THREE.CylinderGeometry(0.95, 0.95, 0.6, 20), wm = mat("#151515", { r: 0.9 });
-        [0.2, 0.8].forEach(f => e.forEach(side => {
-          const w = new THREE.Mesh(wg, wm);
-          const ns = p1 === "n" || p1 === "s";
-          const t = ns ? r.z0 + f * len : r.x0 + f * len;
-          const sx = side === "w" ? r.x0 + 0.3 : side === "e" ? r.x1 - 0.3 : 0, sz = side === "n" ? r.z0 + 0.3 : side === "s" ? r.z1 - 0.3 : 0;
-          if (ns) { w.position.set(sx, y + 0.95, t); w.rotation.z = Math.PI / 2; }
-          else { w.position.set(t, y + 0.95, sz); w.rotation.x = Math.PI / 2; }
-          w.castShadow = true; g.add(w);
+      case "sofa": {                                      // back side p1, fabric colour p2
+        const fab = mat(p2, { r: 0.95 }), base = mat(shade(p2, 0.75), { r: 0.95 });
+        const body = inset(r, 0.05), arms = ENDS(p1);
+        [0.25, 0.75].forEach(f => arms.forEach(e => {     // legs
+          const lr = strip(strip(inset(r, 0.35), e, 0.25), f < 0.5 ? p1 : OPP[p1], 0.25); B(lr, 0, 0.35, WOOD_D);
         }));
+        RB(body, 0.35, 1.15, base, 0.12);
+        const seat = trim(trim(trim(body, p1, 0.85), arms[0], 0.55), arms[1], 0.55);
+        const n = Math.max(2, Math.round(along(seat, arms[0]) / 2.4));
+        split(seat, p1, n).forEach(c => RB(inset(c, 0.04), 1.15, 1.65, fab, 0.18));
+        split(trim(trim(strip(body, p1, 0.85), arms[0], 0.55), arms[1], 0.55), p1, n)
+          .forEach(c => RB(inset(c, 0.04), 1.15, 2.85, fab, 0.22));
+        arms.forEach(e => RB(strip(body, e, 0.55), 0.35, 2.15, fab, 0.2));
+        arms.forEach((e, i) => RB(strip(trim(strip(trim(body, e, 0.6), e, 1.2), p1, 0.85), p1, 0.45), 1.6, 2.7,
+          i ? "#c9a26b" : "#b5835a", 0.2));                // throw pillows
+        break;
+      }
+      case "table": {
+        if (p1 < 2 && placeModel(g, "coffee", cx, y, cz, (r.x1 - r.x0) > (r.z1 - r.z0) ? "e" : "n", [r.x1 - r.x0, r.z1 - r.z0])) break;
+        RB(r, p1 - 0.14, p1, FACADE_MAT.wood || WOOD, 0.05);
+        [["w", "n"], ["w", "s"], ["e", "n"], ["e", "s"]].forEach(([a1, a2]) => B(strip(strip(inset(r, 0.25), a1, 0.2), a2, 0.2), 0, p1 - 0.14, WOOD_D));
+        break;
+      }
+      case "chair":
+        if (placeModel(g, "chair", cx, y, cz, p1)) break;
+        B(r, 1.35, 1.55, WOOD); B(inset(r, 0.3), 0, 1.35, WOOD_D); B(strip(r, p1, 0.18), 1.55, 3.1, WOOD); break;
+      case "tv": {
+        if (!placeModel(g, "tvunit", cx, y, cz, p1, [r.x1 - r.x0, r.z1 - r.z0])) B(r, 0, 1.6, WOOD_D, { r: 0.5 });
+        const sc = strip(r, p1, 0.12), e = ENDS(p1), w = along(r, e[0]) * 0.12;
+        RB(trim(trim(sc, e[0], w), e[1], w), 3.0, 5.9, "#0d0f12", 0.04, { r: 0.2, m: 0.3 });
+        break;
+      }
+      case "cabinet": RB(r, 0, p1, FACADE_MAT.wood || WOOD, 0.04); B(inset(r, -0.05), p1, p1 + 0.08, WOOD_D); break;
+      case "side": {
+        if (!placeModel(g, "side", cx, y, cz, "n", [r.x1 - r.x0, r.z1 - r.z0])) B(r, 0, 1.9, WOOD);
+        cyl(cx, cz, 0.22, 0.18, 1.82, 2.5, "#3b3530", { r: 0.5 });              // lamp base
+        cyl(cx, cz, 0.45, 0.32, 2.5, 3.15, "#f3e3c3", { r: 0.9 });             // shade
+        break;
+      }
+      case "counter": {
+        RB(r, 0.3, 2.75, "#ece8e1", 0.03); B(inset(r, 0.15), 0, 0.3, "#2c2c2e");
+        RB({ x0: r.x0 - 0.06, z0: r.z0 - 0.06, x1: r.x1 + 0.06, z1: r.z1 + 0.06 }, 2.75, 2.92, "#2b2d31", 0.03, { r: 0.18, m: 0.1 });
+        break;
+      }
+      case "sink": {
+        B(inset(r, 0.05), 2.86, 2.93, "#9aa3a8", { m: 0.85, r: 0.2 });
+        cyl(cx, cz, 0.06, 0.06, 2.92, 3.9, CHROME, CH);
+        break;
+      }
+      case "stove": {
+        B(r, 2.92, 2.97, "#121214", { r: 0.15 });
+        const w = r.x1 - r.x0, d = r.z1 - r.z0;
+        [[0.28, 0.28], [0.72, 0.28], [0.28, 0.72], [0.72, 0.72]].forEach(([fx, fz]) => {
+          const t = new THREE.Mesh(new THREE.TorusGeometry(Math.min(w, d) * 0.16, 0.035, 8, 24), mat("#55585c", { m: 0.7, r: 0.4 }));
+          t.rotation.x = Math.PI / 2; t.position.set(r.x0 + w * fx, y + 2.99, r.z0 + d * fz); g.add(t);
+        });
+        break;
+      }
+      case "fridge": {
+        RB(r, 0, 6, "#cdd2d6", 0.12, { m: 0.55, r: 0.3 });
+        B(inset({ ...r, x0: r.x0 - 0.02, x1: r.x1 + 0.02, z0: r.z0 - 0.02, z1: r.z1 + 0.02 }, 0), 3.9, 3.94, "#8e9498");
+        break;
+      }
+      case "wardrobe": RB(r, 0, 7, FACADE_MAT.wood || WOOD, 0.05); B(inset(r, -0.04), 7, 7.12, WOOD_D); break;
+      case "wc": {                                        // back side p1
+        const side = p1 || "n", tank = strip(inset(r, 0.12), side, 0.55);
+        const bowl = trim(inset(r, 0.12), side, 0.45), bx = (bowl.x0 + bowl.x1) / 2, bz = (bowl.z0 + bowl.z1) / 2;
+        const ns = side === "n" || side === "s", rx = (bowl.x1 - bowl.x0) / 2, rz = (bowl.z1 - bowl.z0) / 2, R = Math.min(rx, rz);
+        cyl(bx, bz, R * 0.75, R * 0.6, 0, 1.0, PORC, { r: 0.12 }, rx / R * 0.8, rz / R * 0.8);
+        cyl(bx, bz, R * 0.85, R, 1.0, 1.32, PORC, { r: 0.12 }, rx / R, rz / R);
+        cyl(bx, bz, R * 0.98, R * 0.98, 1.32, 1.38, "#f2f2ee", { r: 0.25 }, rx / R, rz / R);
+        if (p1) RB(tank, 1.1, 2.5, PORC, 0.1, { r: 0.12 });
+        break;
+      }
+      case "basin": {
+        RB(r, 2.55, 2.85, PORC, 0.12, { r: 0.12 });
+        RB(inset(r, 0.22), 2.8, 2.86, "#dfe4e6", 0.08, { r: 0.08 });
+        cyl(cx, cz, 0.28, 0.32, 0, 2.55, PORC, { r: 0.15 });
+        cyl(cx, cz, 0.05, 0.05, 2.85, 3.25, CHROME, CH);
+        break;
+      }
+      case "tub": {
+        RB(r, 0, 1.8, PORC, 0.25, { r: 0.12 });
+        RB(inset(r, 0.3), 1.45, 1.82, "#a9cfdc", 0.2, { r: 0.05 });
+        break;
+      }
+      case "bed": {                                       // head side p1, cover colour p2
+        const len = along(r, p1), e = ENDS(p1);
+        [0.15, 0.85].forEach(f => e.forEach(s => B(strip(strip(inset(r, 0.3), s, 0.25), f < 0.5 ? p1 : OPP[p1], 0.25), 0, 0.3, WOOD_D)));
+        RB(trim(r, p1, 0.4), 0.3, 1.1, FACADE_MAT.wood || WOOD, 0.06);
+        RB(inset(trim(r, p1, 0.45), 0.1), 1.1, 1.95, WHITE, 0.22, { r: 0.9 });
+        RB(strip(r, p1, 0.4), 0.3, 3.9, "#6e6258", 0.15, { r: 0.95 });                         // upholstered headboard
+        const pr = strip(trim(r, p1, 0.65), p1, 1.3), half = along(pr, e[0]) / 2;
+        RB(inset(trim(pr, e[1], half), 0.22), 1.92, 2.5, "#fbfaf6", 0.22, { r: 0.95 });
+        RB(inset(trim(pr, e[0], half), 0.22), 1.92, 2.5, "#fbfaf6", 0.22, { r: 0.95 });
+        const duvet = trim({ x0: r.x0 - 0.06, z0: r.z0 - 0.06, x1: r.x1 + 0.06, z1: r.z1 + 0.06 }, p1, len * 0.38);
+        RB(duvet, 1.55, 2.08, p2, 0.12, { r: 0.95 });
+        RB(trim(duvet, p1, along(duvet, p1) * 0.55), 2.06, 2.12, shade(p2, 0.6), 0.03, { r: 0.95 });   // bed runner
+        break;
+      }
+      case "car": {                                       // front side p1, paint p2
+        const ns = p1 === "n" || p1 === "s", L = ns ? r.z1 - r.z0 : r.x1 - r.x0, W = ns ? r.x1 - r.x0 : r.z1 - r.z0, H = 4.6;
+        const prof = (pts, depth, material) => {
+          const sh = new THREE.Shape(pts.map(([u, v]) => new THREE.Vector2(u * L - L / 2, v * H)));
+          const geo = new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: true, bevelSize: 0.12, bevelThickness: 0.12, bevelSegments: 3, curveSegments: 4 });
+          geo.translate(0, 0, -depth / 2);
+          const m = new THREE.Mesh(geo, material); m.castShadow = m.receiveShadow = true; return m;
+        };
+        const car = new THREE.Group(), paint = mat(p2, { m: 0.6, r: 0.25 }), glassM = mat("#151b20", { m: 0.5, r: 0.05 });
+        car.add(prof([[0.02, 0.2], [0, 0.42], [0.03, 0.6], [0.22, 0.64], [0.75, 0.65], [0.96, 0.56], [1, 0.4], [0.985, 0.2]], W - 0.3, paint));
+        car.add(prof([[0.23, 0.64], [0.35, 0.92], [0.6, 0.93], [0.74, 0.65]], W - 0.75, glassM));
+        car.add(prof([[0.345, 0.9], [0.605, 0.91], [0.6, 0.955], [0.35, 0.95]], W - 0.7, paint));
+        const wheel = new THREE.CylinderGeometry(0.95, 0.95, 0.65, 24), rim = new THREE.CylinderGeometry(0.55, 0.55, 0.68, 16);
+        [0.2, 0.79].forEach(u => [-1, 1].forEach(sd => {
+          const t = new THREE.Mesh(wheel, mat("#121212", { r: 0.9 })); t.rotation.x = Math.PI / 2;
+          t.position.set(u * L - L / 2, 0.95, sd * (W / 2 - 0.45)); t.castShadow = true; car.add(t);
+          const rm = new THREE.Mesh(rim, mat("#b9bec2", { m: 0.85, r: 0.3 })); rm.rotation.x = Math.PI / 2;
+          rm.position.copy(t.position); car.add(rm);
+        }));
+        [-1, 1].forEach(sd => {
+          const hl = new THREE.Mesh(UNIT, mat("#f4f1e6", { r: 0.2 })); hl.scale.set(0.12, 0.3, 0.9);
+          hl.position.set(L / 2 - 0.02, H * 0.5, sd * (W / 2 - 0.9)); car.add(hl);
+          const tl = new THREE.Mesh(UNIT, mat("#8e1414", { r: 0.3 })); tl.scale.set(0.12, 0.3, 1.0);
+          tl.position.set(-L / 2 + 0.03, H * 0.52, sd * (W / 2 - 0.85)); car.add(tl);
+        });
+        car.rotation.y = { e: 0, s: -Math.PI / 2, w: Math.PI, n: Math.PI / 2 }[p1];
+        car.position.set(cx, y, cz); g.add(car);
         break;
       }
       case "shower": {                       // wall-mounted mixer + overhead shower, tiled floor patch in front
@@ -856,21 +993,21 @@ function addFurniture(g, y, list) {
         const tray = { x0: Math.min(x, x + n[0] * 2.6) - (n[0] ? 0 : 1.3), x1: Math.max(x, x + n[0] * 2.6) + (n[0] ? 0 : 1.3),
                        z0: Math.min(z, z + n[1] * 2.6) - (n[1] ? 0 : 1.3), z1: Math.max(z, z + n[1] * 2.6) + (n[1] ? 0 : 1.3) };
         B(tray, 0.01, 0.04, "#aebcc3", { r: 0.4 });
-        const CH = { m: 0.9, r: 0.2 };
-        B(at(0.08, 0.05), 2.4, 6.9, "#c9ced2", CH);                    // riser pipe
-        B(at(0.14, 0.12), 3.1, 3.4, "#c9ced2", CH);                    // mixer
+        B(at(0.08, 0.05), 2.4, 6.9, CHROME, CH);
+        B(at(0.14, 0.12), 3.1, 3.4, CHROME, CH);
         const arm = { x0: Math.min(x, x + n[0] * 0.7) - (n[0] ? 0 : 0.04), x1: Math.max(x, x + n[0] * 0.7) + (n[0] ? 0 : 0.04),
                       z0: Math.min(z, z + n[1] * 0.7) - (n[1] ? 0 : 0.04), z1: Math.max(z, z + n[1] * 0.7) + (n[1] ? 0 : 0.04) };
-        B(arm, 6.85, 6.93, "#c9ced2", CH);
-        B(at(0.75, 0.32), 6.72, 6.82, "#c9ced2", CH);                  // shower head
+        B(arm, 6.85, 6.93, CHROME, CH);
+        cyl(x + n[0] * 0.75, z + n[1] * 0.75, 0.32, 0.32, 6.72, 6.8, CHROME, CH);
         break;
       }
-      case "plant": {
-        const [x, z] = a;
+      case "plant": case "pot": {
+        const key = p1 || ["plant_a", "plant_b", "plant_c"][plantNo++ % 3];
+        if (placeModel(g, key, a[0], y, a[1], rnd() * 6.28)) break;
         const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.55, 1.4, 16), mat("#a65a3a"));
-        pot.position.set(x, y + 0.7, z);
+        pot.position.set(a[0], y + 0.7, a[1]);
         const leaf = new THREE.Mesh(new THREE.IcosahedronGeometry(1.3, 1), mat("#4d7a3a", { r: 0.9 }));
-        leaf.position.set(x, y + 2.6, z);
+        leaf.position.set(a[0], y + 2.6, a[1]);
         [pot, leaf].forEach(m => { m.castShadow = m.receiveShadow = true; g.add(m); });
         break;
       }
@@ -955,6 +1092,7 @@ document.getElementById("wallc").addEventListener("input", e => M.wall.color.set
 document.getElementById("floorc").addEventListener("input", e => { M.floorG.color.set(e.target.value); M.floorF.color.set(e.target.value); });
 document.getElementById("plan").addEventListener("change", e => setPlanMode(e.target.checked));
 
+await loadModels();
 build();
 document.getElementById("loading").remove();
 

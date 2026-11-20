@@ -421,6 +421,38 @@
     ],
     "s",
     "#a3212a"
+   ],
+   [
+    "pot",
+    [
+     33.4,
+     22.6
+    ],
+    "plant_c"
+   ],
+   [
+    "pot",
+    [
+     33.4,
+     36.2
+    ],
+    "plant_a"
+   ],
+   [
+    "pot",
+    [
+     28.5,
+     19.6
+    ],
+    "plant_b"
+   ],
+   [
+    "pot",
+    [
+     16.3,
+     41.0
+    ],
+    "plant_b"
    ]
   ],
   "first": [
@@ -658,6 +690,22 @@
      32.8,
      40
     ]
+   ],
+   [
+    "pot",
+    [
+     21.6,
+     51.4
+    ],
+    "plant_c"
+   ],
+   [
+    "pot",
+    [
+     33.4,
+     22.6
+    ],
+    "plant_a"
    ]
   ]
  },
@@ -2529,5 +2577,15 @@
     6
    ]
   ]
+ },
+ "models": {
+  "tvunit": "modern_wooden_cabinet",
+  "coffee": "modern_coffee_table_01",
+  "chair": "dining_chair_02",
+  "side": "side_table_01",
+  "plant_a": "potted_plant_01",
+  "plant_b": "potted_plant_02",
+  "plant_c": "pachira_aquatica_01:pachira_aquatica_01_bark_d,pachira_aquatica_01_leaves_d",
+  "shrub": "shrub_03:shrub_03_a"
  }
 }
